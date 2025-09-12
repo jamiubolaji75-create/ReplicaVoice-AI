@@ -1,0 +1,165 @@
+// routes/billing.js
+import express from "express";
+import { db } from "../db.js"; // optional if you have db, else modify to use your users array
+import { storage } from "../storage.js"; // your storage wrapper
+import { randomUUID } from "crypto";
+
+const router = express.Router();
+
+/**
+ * Get subscription status for a user
+ * GET /api/subscription/:userId
+ */
+router.get("/:userId", async (req, res) => {
+  const userId = req.params.userId;
+  // If using storage.getUser:
+  const user = await storage.getUser(userId);
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  res.json({
+    subscriptionTier: user.subscriptionTier || "free",
+    stripeCustomerId: user.stripeCustomerId || null,
+    stripeSubscriptionId: user.stripeSubscriptionId || null,
+    provider: user.paymentProvider || null,
+    apiKey: user.apiKey || null,
+  });
+});
+
+/**
+ * Mock subscribe endpoint
+ * POST /api/subscribe
+ * body: { userId, method } where method is "paystack"|"flutterwave"|"paypal"|"manual"
+ * This simulates a successful payment and activates PRO.
+ */
+router.post("/subscribe", async (req, res) => {
+  const { userId, method } = req.body;
+  if (!userId || !method) return res.status(400).json({ error: "userId & method required" });
+
+  // Update user in storage to pro — you can extend storage.updateUserStripeInfo or add a new function.
+  const apiKey = randomUUID();
+
+  const updatedUser = await storage.updateUserStripeInfo(userId, ${method}-cust-${randomUUID()}, ${method}-sub-${randomUUID()}).catch(async (e) => {
+    // if updateUserStripeInfo isn't present or fails, fallback to upsertUser
+    const u = await storage.getUser(userId);
+    if (!u) throw e;
+    const patched = await storage.upsertUser({ ...u, subscriptionTier: "premium", stripeCustomerId: ${method}-cust-${randomUUID()}, stripeSubscriptionId: ${method}-sub-${randomUUID()}, apiKey });
+    return patched;
+  });
+
+  // ensure apiKey is set (if storage.updateUserStripeInfo doesn't set it)
+  if (!updatedUser.apiKey) {
+    await storage.upsertUser({ ...updatedUser, apiKey });
+  }
+
+  res.json({
+    success: true,
+    message: "Subscription activated (mock)",
+    subscriptionTier: "premium",
+    provider: method,
+    apiKey,
+  });
+});
+
+/**
+ * Manual key generation for developers / enterprise
+ * POST /api/generate-key
+ * body: { userId, label }
+ */
+router.post("/generate-key", async (req, res) => {
+  const { userId, label } = req.body;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const apiKey = rvai_${randomUUID()};
+  const user = await storage.getUser(userId);
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  // store the key — simplest: attach to user.apiKey (single key). For multiple keys you'd create a keys table.
+  await storage.upsertUser({ ...user, apiKey, updatedAt: new Date() });
+
+  res.json({ success: true, apiKey });
+});
+
+/**
+ * Middleware to ensure user is pro
+ * usage: protect routes that require PRO
+ */
+export function requirePro(req, res, next) {
+  const userId = req.headers["x-user-id"] || req.body.userId;
+  if (!userId) return res.status(401).json({ error: "Missing user id" });
+  storage.getUser(userId).then((u) => {
+    if (!u) return res.status(401).json({ error: "User not found" });
+    if ((u.subscriptionTier || "free") === "premium") return next();
+    return res.status(402).json({ error: "Upgrade to pro to use this feature" });
+  }).catch((err)=>{ console.error(err); res.status(500).json({error:"Server error"}); });
+}
+
+export default router;import billingRouter, { requirePro } from "./routes/billing.js";
+app.use("/api/subscription", billingRouter);
+
+// Example of protecting a route. Suppose synthesis endpoint should be pro-only:
+app.post("/api/synthesize-pro", requirePro, async (req, res) => {
+  // pro-only synth logic here
+});// src/pages/BillingPage.tsx
+import { useState, useEffect } from "react";
+
+export default function BillingPage({ userId }: { userId: string }) {
+  const [status, setStatus] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetch(/api/subscription/${userId}).then(r=>r.json()).then(setStatus);
+  }, [userId]);
+
+  async function subscribe(method: string) {
+    setLoading(true);
+    const res = await fetch("/api/subscription/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, method }),
+    });
+    const data = await res.json();
+    setLoading(false);
+    if (data.success) setStatus(data);
+    else alert("Subscription failed (mock)");
+  }
+
+  async function generateKey() {
+    const res = await fetch("/api/subscription/generate-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId }),
+    });
+    const data = await res.json();
+    if (data.apiKey) setStatus(prev => ({ ...prev, apiKey: data.apiKey }));
+  }
+
+  return (
+    <div className="p-6">
+      <h2 className="text-2xl font-bold mb-4">Billing & Subscription</h2>
+
+      <div className="mb-4">
+        <strong>Plan:</strong> {status?.subscriptionTier || "free"}
+      </div>
+
+      <div className="mb-4">
+        <button onClick={() => subscribe("paystack")} disabled={loading} className="btn mr-2">
+          Upgrade with Paystack (mock)
+        </button>
+        <button onClick={() => subscribe("flutterwave")} disabled={loading} className="btn mr-2">
+          Upgrade with Flutterwave (mock)
+        </button>
+        <button onClick={() => subscribe("paypal")} disabled={loading} className="btn">
+          Upgrade with PayPal (mock)
+        </button>
+      </div>
+
+      <div className="mb-4">
+        <button onClick={generateKey} className="btn">Generate API Key (manual)</button>
+      </div>
+
+      <div>
+        <strong>API Key:</strong> <code>{status?.apiKey || "No key generated"}</code>
+      </div>
+    </div>
+  );
+}
